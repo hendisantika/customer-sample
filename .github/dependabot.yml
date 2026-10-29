@@ -1,5 +1,6 @@
 version: 2
 updates:
+  # Maven dependencies (Spring Boot parent, plugins, libraries)
   - package-ecosystem: maven
     directory: "/"
     schedule:
@@ -7,10 +8,53 @@ updates:
       time: '05:00'
       timezone: Asia/Jakarta
     open-pull-requests-limit: 10
-  - package-ecosystem: "github-actions"
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps-dev)"
+      include: scope
+    groups:
+      # Spring Boot parent and everything it manages move together
+      spring-boot:
+        patterns:
+          - "org.springframework*"
+      # Bundle remaining minor/patch bumps into a single PR to cut noise
+      maven-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions used by the CI workflow
+  - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: daily
       time: '05:00'
       timezone: Asia/Jakarta
     open-pull-requests-limit: 10
+    commit-message:
+      prefix: "ci(deps)"
+      include: scope
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Base image in the Dockerfile (amazoncorretto)
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:00'
+      timezone: Asia/Jakarta
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build(docker)"
+      include: scope
+    ignore:
+      # Stay on the JDK 25 LTS line; move to a new Java major deliberately
+      - dependency-name: "amazoncorretto"
+        update-types:
+          - version-update:semver-major
