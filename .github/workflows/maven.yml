@@ -13,10 +13,19 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Compile and run the test suite on every push and pull request (incl. Dependabot PRs)
   build:
-
+    name: Build & test (JDK 25)
     runs-on: ubuntu-latest
 
     steps:
@@ -32,25 +41,48 @@ jobs:
       run: mvn --version
 
     - name: Build with Maven
-      run: mvn -B package --file pom.xml
+      run: mvn -B verify --file pom.xml
 
-    - name: Build and push
-      run: mvn clean install jib:build -Djib.from-platforms="linux/amd64,linux/arm64" -Djib.to.image=hendisantika/customer -Djib.to.tags=${{ github.run_number }},latest -Djib.to.auth.username=${{ secrets.DOCKERHUB_USERNAME }} -Djib.to.auth.password=${{ secrets.DOCKERHUB_TOKEN }}
+  # Publish container images only for commits that land on main (secrets are not available to Dependabot PRs)
+  publish:
+    name: Publish image
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up JDK 25
+      uses: actions/setup-java@v6.1.0
+      with:
+        java-version: '25'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Build and push to Docker Hub
+      env:
+        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      run: mvn -B -DskipTests package jib:build -Djib.from-platforms="linux/amd64,linux/arm64" -Djib.to.image=hendisantika/customer -Djib.to.tags=${{ github.run_number }},latest -Djib.to.auth.username="$DOCKERHUB_USERNAME" -Djib.to.auth.password="$DOCKERHUB_TOKEN"
+
+    # Opt-in: set the repository variable ENABLE_CLOUDRAYA_DEPLOY=true once the Cloud Raya credentials are valid
     - name: Build and push to Cloud Raya
-      run: |
-        docker login registry.cloudraya.com --username=${{ secrets.CLOUDRAYA_USERNAME }} --password=${{ secrets.CLOUDRAYA_PASSWORD }}
-        mvn clean install jib:build -Djib.from-platforms="linux/amd64,linux/arm64" -Djib.to.image=registry.cloudraya.com/${{ secrets.CLOUDRAYA_USERNAME }}/customer-app -Djib.to.tags=${{ github.run_number }},latest -Djib.to.auth.username=${{ secrets.CLOUDRAYA_USERNAME }} -Djib.to.auth.password=${{ secrets.CLOUDRAYA_PASSWORD }}
-      #        docker build -t registry.cloudraya.com/${{ secrets.CLOUDRAYA_USERNAME }}/customer-app:${{ github.run_number }} .
-      #        docker push registry.cloudraya.com/${{ secrets.CLOUDRAYA_USERNAME }}/customer-app:${{ github.run_number }}
+      if: vars.ENABLE_CLOUDRAYA_DEPLOY == 'true'
+      env:
+        CLOUDRAYA_USERNAME: ${{ secrets.CLOUDRAYA_USERNAME }}
+        CLOUDRAYA_PASSWORD: ${{ secrets.CLOUDRAYA_PASSWORD }}
+      run: mvn -B -DskipTests package jib:build -Djib.from-platforms="linux/amd64,linux/arm64" -Djib.to.image="registry.cloudraya.com/$CLOUDRAYA_USERNAME/customer-app" -Djib.to.tags=${{ github.run_number }},latest -Djib.to.auth.username="$CLOUDRAYA_USERNAME" -Djib.to.auth.password="$CLOUDRAYA_PASSWORD"
 
-      # Optional: Uploads the full dependency graph to GitHub to improve the quality of Dependabot alerts this repository can receive
+    # Uploads the full dependency graph to GitHub to improve the quality of Dependabot alerts this repository can receive
     - name: Update dependency graph
       uses: advanced-security/maven-dependency-submission-action@a64327a7329c9939cf675e458452febe1894a70c
 
 
   deploy:
-    needs: build
+    needs: publish
+    if: vars.ENABLE_CLOUDRAYA_DEPLOY == 'true'
     name: deploy image
     runs-on: ubuntu-24.04
     environment: development
@@ -167,7 +199,8 @@ jobs:
           ./deploy-cloudraya.sh
 
   deploy-to-k8s:
-    needs: build
+    needs: publish
+    if: vars.ENABLE_CLOUDRAYA_DEPLOY == 'true'
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
     environment: production
